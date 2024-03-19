@@ -1,0 +1,8 @@
+(library
+ (public_name ppx_string_conv)
+ (name ppx_string_conv)
+ (kind ppx_rewriter)
+ (ppx_runtime_libraries base)
+ (libraries base capitalization compiler-libs.common ppxlib)
+ (preprocess
+  (pps ppx_string ppx_let ppxlib.metaquot)))
