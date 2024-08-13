@@ -207,7 +207,8 @@ module Variant_impl = struct
 
   let get_nested_type constr =
     match (constr : constructor_declaration) with
-    | { pcd_args = Pcstr_tuple [ ty ]; pcd_vars = []; pcd_res = None; _ } ->
+    | { pcd_args = Pcstr_tuple [ arg ]; pcd_vars = []; pcd_res = None; _ } ->
+      let ty = Ppxlib_jane.Shim.Pcstr_tuple_arg.to_core_type arg in
       (match ty with
        | { ptyp_desc = Ptyp_constr (nested_type, []); _ } -> Ok nested_type
        | _ -> Error (error_ext ~loc:ty.ptyp_loc "types with parameters not supported"))
@@ -433,16 +434,30 @@ end
 
 let build_alias_impl ~(type_name : string loc) ~(to_ : core_type) ~loc ~what_to_generate =
   (* Builds implementations for [type t = Other_type.t] types *)
-  match to_ with
-  | { ptyp_desc = Ptyp_constr (other_type, []); _ } ->
-    let build_fn fn_name =
-      let pat_fn_name = A.pvar ~loc (Fn_name.for_type fn_name ~type_name:type_name.txt) in
-      let other_fn = Fn_name.get_function fn_name ~type_:other_type in
-      [%stri let [%p pat_fn_name] = [%e other_fn]]
-    in
-    What_to_generate.build what_to_generate ~f:build_fn
-  | _ -> [ pstr_error ~loc:to_.ptyp_loc "types with parameters not supported" ]
+  match to_.ptyp_desc with
+  | Ptyp_constr (other_type, parameters) ->
+    (match List.is_empty parameters with
+     | false -> Error "types with parameters not supported"
+     | true ->
+       let build_fn fn_name =
+         let pat_fn_name =
+           A.pvar ~loc (Fn_name.for_type fn_name ~type_name:type_name.txt)
+         in
+         let other_fn = Fn_name.get_function fn_name ~type_:other_type in
+         [%stri let [%p pat_fn_name] = [%e other_fn]]
+       in
+       Ok (What_to_generate.build what_to_generate ~f:build_fn))
+  | Ptyp_variant _ -> Error "polymorphic variants not supported"
+  | _ ->
+    (* There's a few other niche cases (objects/class/package types) which we
+       can give a generic message to *)
+    Error "type not supported"
 ;;
+
+module Argument_names = struct
+  let case_insensitive = "case_insensitive"
+  let capitalize = "capitalize"
+end
 
 let build_impl_or_error
   ~loc
@@ -470,9 +485,37 @@ let build_impl_or_error
        Variant_impl.render impl ~what_to_generate
      | Ptype_abstract, Some type_ ->
        (* [type t = Some_other.t] *)
-       Ok (build_alias_impl ~loc ~type_name:decl.ptype_name ~to_:type_ ~what_to_generate)
+       let invalid_argument_names = [] in
+       let invalid_argument_names =
+         if case_insensitive
+         then Argument_names.case_insensitive :: invalid_argument_names
+         else invalid_argument_names
+       in
+       let invalid_argument_names =
+         match capitalize_string with
+         | None -> invalid_argument_names
+         | Some _ -> Argument_names.capitalize :: invalid_argument_names
+       in
+       let not_supported not_supported =
+         Error
+           [%string "%{not_supported} not supported when used with abstract type aliases"]
+       in
+       let%bind.Result () =
+         match invalid_argument_names with
+         | [] -> Ok ()
+         | [ invalid_argument_name ] ->
+           not_supported [%string "deriver argument [%{invalid_argument_name}]"]
+         | _ :: _ :: _ ->
+           let invalid_argument_names =
+             List.map invalid_argument_names ~f:(fun invalid_argument_name ->
+               [%string "[%{invalid_argument_name}]"])
+             |> String.concat ~sep:", "
+           in
+           not_supported [%string "deriver arguments %{invalid_argument_names}"]
+       in
+       build_alias_impl ~loc ~type_name:decl.ptype_name ~to_:type_ ~what_to_generate
      | Ptype_abstract, None -> Error "abstract types not supported"
-     | Ptype_open, _ -> (* [type t = ..] *) Error "open types not supported")
+     | Ptype_open, _ -> (* [type t = ..] *) Error "extensible variants not supported")
 ;;
 
 let build_impl ~loc ~code_path ~case_insensitive ~capitalize_string ~what_to_generate decl
@@ -492,7 +535,10 @@ let build_impl ~loc ~code_path ~case_insensitive ~capitalize_string ~what_to_gen
 
 let generate_impl ~what_to_generate =
   Deriving.Generator.V2.make
-    Deriving.Args.(empty +> flag "case_insensitive" +> arg "capitalize" (estring __))
+    Deriving.Args.(
+      empty
+      +> flag Argument_names.case_insensitive
+      +> arg Argument_names.capitalize (estring __))
     (fun ~ctxt (_rec_flag, types) case_insensitive capitalize_string ->
       let loc = Expansion_context.Deriver.derived_item_loc ctxt in
       let code_path = Expansion_context.Deriver.code_path ctxt in

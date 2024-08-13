@@ -23,6 +23,10 @@ end = struct
 end
 ```
 
+It is not possible to change the capitalization of an aliased type, unless you also give
+its variants (`type t = Sign.t = Neg | Pos | Zero`), in which case the capitalization
+described in [Variants](#variants) applies.
+
 # Choosing what to generate
 
 Using `[@@deriving string]` generates both `of_string` and `to_string`.
