@@ -66,7 +66,7 @@ let pstr_error ~loc message = A.pstr_extension ~loc (error_ext ~loc message) []
 let lstring (loc : string loc) = A.estring ~loc:loc.loc loc.txt
 
 let make_stringable_sig_for_type ~loc ~what_to_generate (decl : type_declaration)
-  : signature
+  : signature_item list
   =
   match List.is_empty decl.ptype_params with
   | false ->
