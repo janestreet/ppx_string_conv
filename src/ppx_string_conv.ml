@@ -253,6 +253,7 @@ module Generic_variant_renderer = struct
     ; basic_cases : Basic_case.t list
     ; nested_cases : Nested_case.t list
     ; maybe_fallback_case : Fallback_case.t option
+    ; list_options_on_error : bool
     ; portable : bool
     }
 
@@ -278,6 +279,7 @@ module Generic_variant_renderer = struct
     ; basic_cases
     ; nested_cases
     ; maybe_fallback_case
+    ; list_options_on_error = _
     ; portable
     }
     =
@@ -334,6 +336,7 @@ module Generic_variant_renderer = struct
     ; basic_cases
     ; nested_cases
     ; maybe_fallback_case
+    ; list_options_on_error
     ; portable
     }
     =
@@ -361,8 +364,29 @@ module Generic_variant_renderer = struct
         let fn_name = Fn_name.for_type Of_string ~type_name:decl.ptype_name.txt in
         let path = Code_path.fully_qualified_path code_path in
         let message = A.estring ~loc [%string "%{path}.%{fn_name}: invalid string"] in
-        [%expr
-          Base.raise_s (List [ Atom [%e message]; List [ Atom "value"; Atom [%e expr] ] ])]
+        (match list_options_on_error with
+         | false ->
+           [%expr
+             Base.raise_s
+               (List [ Atom [%e message]; List [ Atom "value"; Atom [%e expr] ] ])]
+         | true ->
+           (match nested_cases with
+            | [] -> ()
+            | _ :: _ ->
+              failwith "Using [list_options_on_error] is incompatible with [nested].");
+           let valid_strings =
+             A.elist
+               ~loc
+               (List.map basic_cases ~f:(fun basic_case ->
+                  [%expr Atom [%e A.estring ~loc basic_case.string.txt]]))
+           in
+           [%expr
+             Base.raise_s
+               (List
+                  [ Atom [%e message]
+                  ; List [ Atom "value"; Atom [%e expr] ]
+                  ; List [ Atom "valid_options"; List [%e valid_strings] ]
+                  ])])
       | Some ({ expression_of_x; nested_type; pattern_with_x = _ } : Fallback_case.t) ->
         call_nested ~expression_of_x ~nested_type expr
     in
@@ -452,6 +476,7 @@ module Generic_variant_renderer = struct
     ; basic_cases = _
     ; nested_cases = _
     ; maybe_fallback_case = _
+    ; list_options_on_error = _
     ; portable = _
     }
     =
@@ -485,10 +510,19 @@ module Variant_impl = struct
         (constructor_declaration * longident_loc * string Loc.t option) Queue.t
     ; mutable fallback_variant : (constructor_declaration * longident_loc) option
     ; errors : extension Queue.t
+    ; list_options_on_error : bool
     ; portable : bool
     }
 
-  let create' ~loc ~code_path ~case_insensitive ~capitalize_string ~decl ~portable =
+  let create'
+    ~loc
+    ~code_path
+    ~case_insensitive
+    ~capitalize_string
+    ~decl
+    ~list_options_on_error
+    ~portable
+    =
     let%map.Result capitalization = capitalization_of_string capitalize_string in
     { loc
     ; code_path
@@ -499,6 +533,7 @@ module Variant_impl = struct
     ; nested_variants = Queue.create ()
     ; fallback_variant = None
     ; errors = Queue.create ()
+    ; list_options_on_error
     ; portable
     }
   ;;
@@ -548,12 +583,20 @@ module Variant_impl = struct
     ~code_path
     ~case_insensitive
     ~capitalize_string
+    ~list_options_on_error
     ~decl
     ~constructors
     ~portable
     =
     let%map.Result t =
-      create' ~loc ~code_path ~case_insensitive ~capitalize_string ~decl ~portable
+      create'
+        ~loc
+        ~code_path
+        ~case_insensitive
+        ~capitalize_string
+        ~list_options_on_error
+        ~decl
+        ~portable
     in
     List.iter constructors ~f:(fun constructor ->
       match add_variant t constructor with
@@ -572,6 +615,7 @@ module Variant_impl = struct
     ; nested_variants
     ; fallback_variant
     ; errors
+    ; list_options_on_error
     ; portable
     }
     ~what_to_generate
@@ -609,6 +653,7 @@ module Variant_impl = struct
       ; basic_cases
       ; nested_cases
       ; maybe_fallback_case
+      ; list_options_on_error
       ; portable
       }
     in
@@ -705,6 +750,7 @@ module Poly_variant_impl = struct
     ~code_path
     ~case_insensitive
     ~capitalize_string
+    ~list_options_on_error
     ~decl
     ~row_fields
     ~portable
@@ -738,6 +784,7 @@ module Poly_variant_impl = struct
        ; basic_cases
        ; nested_cases
        ; maybe_fallback_case
+       ; list_options_on_error
        ; portable
        }
        : Generic_variant_renderer.t)
@@ -747,6 +794,7 @@ end
 module Argument_names = struct
   let case_insensitive = "case_insensitive"
   let capitalize = "capitalize"
+  let list_options_on_error = "list_options_on_error"
 end
 
 let build_variant_impl
@@ -754,6 +802,7 @@ let build_variant_impl
   ~code_path
   ~case_insensitive
   ~capitalize_string
+  ~list_options_on_error
   ~what_to_generate
   ~decl
   ~constructors
@@ -765,6 +814,7 @@ let build_variant_impl
       ~code_path
       ~case_insensitive
       ~capitalize_string
+      ~list_options_on_error
       ~decl
       ~constructors
       ~portable
@@ -777,6 +827,7 @@ let build_poly_variant_impl
   ~code_path
   ~case_insensitive
   ~capitalize_string
+  ~list_options_on_error
   ~what_to_generate
   ~decl
   ~row_fields
@@ -788,6 +839,7 @@ let build_poly_variant_impl
       ~code_path
       ~case_insensitive
       ~capitalize_string
+      ~list_options_on_error
       ~decl
       ~row_fields
       ~portable
@@ -839,6 +891,7 @@ let build_impl_or_error
   ~code_path
   ~case_insensitive
   ~capitalize_string
+  ~list_options_on_error
   ~what_to_generate
   ~portable
   (decl : type_declaration)
@@ -860,6 +913,7 @@ let build_impl_or_error
       ~code_path
       ~case_insensitive
       ~capitalize_string
+      ~list_options_on_error
       ~what_to_generate
       ~decl
       ~constructors
@@ -873,6 +927,7 @@ let build_impl_or_error
          ~code_path
          ~case_insensitive
          ~capitalize_string
+         ~list_options_on_error
          ~what_to_generate
          ~decl
          ~row_fields
@@ -899,6 +954,7 @@ let build_impl
   ~code_path
   ~case_insensitive
   ~capitalize_string
+  ~list_options_on_error
   ~what_to_generate
   ~portable
   decl
@@ -909,6 +965,7 @@ let build_impl
       ~code_path
       ~case_insensitive
       ~capitalize_string
+      ~list_options_on_error
       ~what_to_generate
       ~portable
       decl
@@ -923,8 +980,14 @@ let generate_impl ~what_to_generate =
       empty
       +> flag Argument_names.case_insensitive
       +> arg Argument_names.capitalize (estring __)
+      +> flag Argument_names.list_options_on_error
       +> flag "portable")
-    (fun ~ctxt (_rec_flag, types) case_insensitive capitalize_string portable ->
+    (fun ~ctxt
+      (_rec_flag, types)
+      case_insensitive
+      capitalize_string
+      list_options_on_error
+      portable ->
       let loc = Expansion_context.Deriver.derived_item_loc ctxt in
       let code_path = Expansion_context.Deriver.code_path ctxt in
       List.concat_map
@@ -935,6 +998,7 @@ let generate_impl ~what_to_generate =
              ~code_path
              ~case_insensitive
              ~capitalize_string
+             ~list_options_on_error
              ~what_to_generate
              ~portable))
 ;;
