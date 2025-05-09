@@ -177,6 +177,26 @@ Apple
 Orange
 ```
 
+## List all options on error with `~list_options_on_error`
+
+You can make `of_string` return the list of valid string input options by using the
+`~list_options_on_error` deriving argument.
+
+```ocaml
+module List_options_on_error = struct
+  type t =
+    | Blue
+    | Red
+  [@@deriving string ~list_options_on_error]
+end
+```
+
+```ocaml
+# let () = try ignore (List_options_on_error.of_string "Green" : List_options_on_error.t) with | exn -> print_s (Exn.sexp_of_t exn)
+("Toplevel.List_options_on_error.of_string: invalid string" (value Green)
+ (valid_options (Blue Red)))
+```
+
 ## Nesting with `[@nested "prefix"]`
 
 You can nest types with a prefix to disambiguate
