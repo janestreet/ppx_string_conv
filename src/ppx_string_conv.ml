@@ -120,6 +120,7 @@ module Constructor_kind = struct
     | Base_string of { name : string Loc.t option }
     | Fallback
     | Nested of { prefix : string Loc.t option }
+    | Nested_auto_prefix
 
   module Attr = struct
     let fallback' context =
@@ -134,7 +135,10 @@ module Constructor_kind = struct
       Attribute.declare_with_attr_loc
         "stringable.nested"
         context
-        Ast_pattern.(single_expr_payload (estring __'))
+        Ast_pattern.(
+          alt
+            (map1 ~f:(fun prefix -> Some prefix) (single_expr_payload (estring __')))
+            (map0 ~f:None (pstr nil)))
         (fun ~attr_loc:loc prefix -> loc, prefix)
     ;;
 
@@ -164,17 +168,26 @@ module Constructor_kind = struct
     in
     match fallback, nested, rename with
     | Some _, None, None -> Ok Fallback
-    | None, Some (_, prefix), None ->
-      let prefix = if String.is_empty prefix.txt then None else Some prefix in
-      Ok (Nested { prefix })
+    | None, Some (_, prefix_opt), None ->
+      (match prefix_opt with
+       | Some prefix ->
+         let prefix = if String.is_empty prefix.txt then None else Some prefix in
+         Ok (Nested { prefix })
+       | None -> Ok Nested_auto_prefix)
     | None, None, name -> Ok (Base_string { name })
     | Some loc, _, _ | _, Some (loc, _), _ -> multiple_attribute_error ~loc
   ;;
 
-  let get = get' ~fallback:Attr.fallback ~nested:Attr.nested ~rename:Attr.rename
+  let get constr =
+    get' constr ~fallback:Attr.fallback ~nested:Attr.nested ~rename:Attr.rename
+  ;;
 
-  let get_poly =
-    get' ~fallback:Attr.fallback_poly ~nested:Attr.nested_poly ~rename:Attr.rename_poly
+  let get_poly constr =
+    get'
+      constr
+      ~fallback:Attr.fallback_poly
+      ~nested:Attr.nested_poly
+      ~rename:Attr.rename_poly
   ;;
 end
 
@@ -184,21 +197,36 @@ let get_nested_type ~loc (type_ : core_type) =
   | _ -> Error (error_ext ~loc "types with parameters not supported")
 ;;
 
-let capitalization_of_string deriving_arg =
-  match deriving_arg with
-  | None -> Ok None
-  | Some s ->
-    (try Ok (Some (Capitalization.of_string s)) with
-     | _ ->
-       let can_be = Lazy.force Capitalization.can_be |> String.concat ~sep:", " in
-       Error [%string "invalid capitalize argument: (can be: %{can_be})"])
-;;
-
 let maybe_capitalize ~capitalization name =
   match capitalization with
   | None -> name
   | Some capitalization ->
-    Loc.map name ~f:(Capitalization.apply_to_snake_case capitalization)
+    Loc.map
+      name
+      ~f:(Capitalization_ppx_configuration.apply_to_snake_case_exn capitalization)
+;;
+
+let generate_auto_prefix ~capitalization ~variant_name ~nested_separator =
+  (* Generate prefix from variant name + separator from capitalization or nested_separator *)
+  let transformed_name = maybe_capitalize ~capitalization variant_name in
+  let separator =
+    match nested_separator with
+    | Some sep -> sep
+    | None ->
+      (match capitalization with
+       | None -> "_"
+       | Some (Multi_word cap) ->
+         (match Capitalization.separator cap with
+          (* Absence of the separator means that words are just concatenated. *)
+          | None -> ""
+          | Some sep_char -> String.make 1 sep_char)
+       | Some (Single_word single_word) ->
+         Capitalization_ppx_configuration.Single_word.raise_incompatible
+           single_word
+           "single word capitalizations are not compatible with [@nested];@ either \
+            specify the ~nested_separator argument or use a multiple word capitalization")
+  in
+  Loc.map transformed_name ~f:(fun name -> name ^ separator)
 ;;
 
 let build_function ~loc ~decl ~fn_name ~types ~arg_name ~match_ ~cases ~portable =
@@ -245,7 +273,7 @@ module Generic_variant_renderer = struct
     { loc : Location.t
     ; code_path : Code_path.t
     ; case_insensitive : bool
-    ; capitalization : Capitalization.t option
+    ; capitalization : Capitalization_ppx_configuration.t option
     ; decl : type_declaration
     ; errors : extension list
     ; basic_cases : Basic_case.t list
@@ -501,7 +529,8 @@ module Variant_impl = struct
     { loc : Location.t
     ; code_path : Code_path.t
     ; case_insensitive : bool
-    ; capitalization : Capitalization.t option
+    ; capitalization : Capitalization_ppx_configuration.t option
+    ; nested_separator : string option
     ; decl : type_declaration
     ; base_string_variants : (constructor_declaration * string Loc.t) Queue.t
     ; nested_variants :
@@ -511,30 +540,6 @@ module Variant_impl = struct
     ; list_options_on_error : bool
     ; portable : bool
     }
-
-  let create'
-    ~loc
-    ~code_path
-    ~case_insensitive
-    ~capitalize_string
-    ~decl
-    ~list_options_on_error
-    ~portable
-    =
-    let%map.Result capitalization = capitalization_of_string capitalize_string in
-    { loc
-    ; code_path
-    ; case_insensitive
-    ; capitalization
-    ; decl
-    ; base_string_variants = Queue.create ()
-    ; nested_variants = Queue.create ()
-    ; fallback_variant = None
-    ; errors = Queue.create ()
-    ; list_options_on_error
-    ; portable
-    }
-  ;;
 
   let parse_base_string t ~constr ~name =
     match (constr : constructor_declaration) with
@@ -574,27 +579,42 @@ module Variant_impl = struct
     | Nested { prefix } ->
       let%map.Result nested_type = get_nested_type constr in
       Queue.enqueue t.nested_variants (constr, nested_type, prefix)
+    | Nested_auto_prefix ->
+      let%map.Result nested_type = get_nested_type constr in
+      let auto_prefix =
+        generate_auto_prefix
+          ~capitalization:t.capitalization
+          ~variant_name:constr.pcd_name
+          ~nested_separator:t.nested_separator
+      in
+      Queue.enqueue t.nested_variants (constr, nested_type, Some auto_prefix)
   ;;
 
   let create
     ~loc
     ~code_path
     ~case_insensitive
-    ~capitalize_string
+    ~capitalization
     ~list_options_on_error
+    ~nested_separator
     ~decl
     ~constructors
     ~portable
     =
-    let%map.Result t =
-      create'
-        ~loc
-        ~code_path
-        ~case_insensitive
-        ~capitalize_string
-        ~list_options_on_error
-        ~decl
-        ~portable
+    let t =
+      { loc
+      ; code_path
+      ; case_insensitive
+      ; capitalization
+      ; nested_separator
+      ; decl
+      ; base_string_variants = Queue.create ()
+      ; nested_variants = Queue.create ()
+      ; fallback_variant = None
+      ; errors = Queue.create ()
+      ; list_options_on_error
+      ; portable
+      }
     in
     List.iter constructors ~f:(fun constructor ->
       match add_variant t constructor with
@@ -608,6 +628,7 @@ module Variant_impl = struct
     ; code_path
     ; case_insensitive
     ; capitalization
+    ; nested_separator = _
     ; decl
     ; base_string_variants
     ; nested_variants
@@ -660,7 +681,7 @@ module Variant_impl = struct
 end
 
 module Poly_variant_impl = struct
-  let parse_row_field ~loc ~capitalization ~decl (rtag : row_field) =
+  let parse_row_field ~loc ~capitalization ~nested_separator ~decl (rtag : row_field) =
     let this_type = type_of_decl decl in
     let%bind.Result constructor_kind = Constructor_kind.get_poly rtag in
     let error txt = Error (error_ext ~loc txt) in
@@ -716,8 +737,18 @@ module Poly_variant_impl = struct
     | Rinherit subvariant, Base_string { name = None } ->
       make_subvariant subvariant ~prefix:None
     | Rinherit subvariant, Nested { prefix } -> make_subvariant ~prefix subvariant
+    | Rinherit _, Nested_auto_prefix ->
+      error
+        [%string
+          "You used [@nested] on a polymorphic subvariant; most likely you will achieve \
+           the desired behavior by dropping it."]
     | Rtag (name, false, [ inner_type ]), Nested { prefix } ->
       make_nested ~prefix ~name ~inner_type
+    | Rtag (name, false, [ inner_type ]), Nested_auto_prefix ->
+      let auto_prefix =
+        generate_auto_prefix ~capitalization ~variant_name:name ~nested_separator
+      in
+      make_nested ~prefix:(Some auto_prefix) ~name ~inner_type
     | Rtag (name, false, [ inner_type ]), Fallback -> make_fallback ~name ~inner_type
     | Rtag (name, false, [ _ ]), Base_string _ ->
       error
@@ -730,7 +761,7 @@ module Poly_variant_impl = struct
           "invalid state: no empty constructor, no non-empty constructors: [%{name.txt}]"]
     | Rtag (name, true, []), Fallback ->
       error [%string "can't use [@fallback] on a regular case: [%{name.txt}]"]
-    | Rtag (name, true, []), Nested _ ->
+    | Rtag (name, true, []), (Nested _ | Nested_auto_prefix) ->
       error [%string "can't use [@nested] on a regular case: [%{name.txt}]"]
     | Rtag (name, true, _ :: _), _ | Rtag (name, false, _ :: _ :: _), _ ->
       error
@@ -747,16 +778,16 @@ module Poly_variant_impl = struct
     ~loc
     ~code_path
     ~case_insensitive
-    ~capitalize_string
+    ~capitalization
     ~list_options_on_error
+    ~nested_separator
     ~decl
     ~row_fields
     ~portable
     =
-    let%bind.Result capitalization = capitalization_of_string capitalize_string in
     let cases, errors =
       List.fold_right row_fields ~init:([], []) ~f:(fun row_field (rows, errors) ->
-        match parse_row_field ~loc ~capitalization ~decl row_field with
+        match parse_row_field ~loc ~capitalization ~nested_separator ~decl row_field with
         | Ok row -> row :: rows, errors
         | Error error -> rows, error :: errors)
     in
@@ -791,41 +822,43 @@ end
 
 module Argument_names = struct
   let case_insensitive = "case_insensitive"
-  let capitalize = "capitalize"
+  let capitalize = Capitalization_ppx_configuration.argument_name
   let list_options_on_error = "list_options_on_error"
+  let nested_separator = "nested_separator"
 end
 
 let build_variant_impl
   ~loc
   ~code_path
   ~case_insensitive
-  ~capitalize_string
+  ~capitalization
   ~list_options_on_error
+  ~nested_separator
   ~what_to_generate
   ~decl
   ~constructors
   ~portable
   =
-  let%map.Result impl =
-    Variant_impl.create
-      ~loc
-      ~code_path
-      ~case_insensitive
-      ~capitalize_string
-      ~list_options_on_error
-      ~decl
-      ~constructors
-      ~portable
-  in
-  Variant_impl.render impl ~what_to_generate
+  Variant_impl.create
+    ~loc
+    ~code_path
+    ~case_insensitive
+    ~capitalization
+    ~list_options_on_error
+    ~nested_separator
+    ~decl
+    ~constructors
+    ~portable
+  |> Variant_impl.render ~what_to_generate
 ;;
 
 let build_poly_variant_impl
   ~loc
   ~code_path
   ~case_insensitive
-  ~capitalize_string
+  ~capitalization
   ~list_options_on_error
+  ~nested_separator
   ~what_to_generate
   ~decl
   ~row_fields
@@ -836,8 +869,9 @@ let build_poly_variant_impl
       ~loc
       ~code_path
       ~case_insensitive
-      ~capitalize_string
+      ~capitalization
       ~list_options_on_error
+      ~nested_separator
       ~decl
       ~row_fields
       ~portable
@@ -848,7 +882,8 @@ let build_poly_variant_impl
 let build_alias_impl
   ~loc
   ~case_insensitive
-  ~capitalize_string
+  ~capitalization
+  ~nested_separator
   ~what_to_generate
   ~decl
   ~alias_to
@@ -856,7 +891,8 @@ let build_alias_impl
   =
   let invalid_argument_names =
     [ Option.some_if case_insensitive Argument_names.case_insensitive
-    ; Option.map capitalize_string ~f:(Fn.const Argument_names.capitalize)
+    ; Option.map capitalization ~f:(Fn.const Argument_names.capitalize)
+    ; Option.map nested_separator ~f:(Fn.const Argument_names.nested_separator)
     ]
     |> List.filter_opt
   in
@@ -888,8 +924,9 @@ let build_impl_or_error
   ~loc
   ~code_path
   ~case_insensitive
-  ~capitalize_string
+  ~capitalization
   ~list_options_on_error
+  ~nested_separator
   ~what_to_generate
   ~portable
   (decl : type_declaration)
@@ -906,16 +943,18 @@ let build_impl_or_error
   | Ptype_open, [], _ -> (* [type t = ..] *) Error "extensible variants not supported"
   | Ptype_variant constructors, [], _ ->
     (* [t] is a normal variant *)
-    build_variant_impl
-      ~loc
-      ~code_path
-      ~case_insensitive
-      ~capitalize_string
-      ~list_options_on_error
-      ~what_to_generate
-      ~decl
-      ~constructors
-      ~portable
+    Ok
+      (build_variant_impl
+         ~loc
+         ~code_path
+         ~case_insensitive
+         ~capitalization
+         ~list_options_on_error
+         ~nested_separator
+         ~what_to_generate
+         ~decl
+         ~constructors
+         ~portable)
   | Ptype_abstract, [], Some type_ ->
     (match type_.ptyp_desc with
      | Ptyp_variant (row_fields, Closed, None) ->
@@ -924,8 +963,9 @@ let build_impl_or_error
          ~loc
          ~code_path
          ~case_insensitive
-         ~capitalize_string
+         ~capitalization
          ~list_options_on_error
+         ~nested_separator
          ~what_to_generate
          ~decl
          ~row_fields
@@ -935,7 +975,8 @@ let build_impl_or_error
        build_alias_impl
          ~loc
          ~case_insensitive
-         ~capitalize_string
+         ~capitalization
+         ~nested_separator
          ~what_to_generate
          ~decl
          ~alias_to
@@ -951,8 +992,9 @@ let build_impl
   ~loc
   ~code_path
   ~case_insensitive
-  ~capitalize_string
+  ~capitalization
   ~list_options_on_error
+  ~nested_separator
   ~what_to_generate
   ~portable
   decl
@@ -962,8 +1004,9 @@ let build_impl
       ~loc
       ~code_path
       ~case_insensitive
-      ~capitalize_string
+      ~capitalization
       ~list_options_on_error
+      ~nested_separator
       ~what_to_generate
       ~portable
       decl
@@ -977,14 +1020,16 @@ let generate_impl ~what_to_generate =
     Deriving.Args.(
       empty
       +> flag Argument_names.case_insensitive
-      +> arg Argument_names.capitalize (estring __)
+      +> Capitalization_ppx_configuration.argument ~ppx_name
       +> flag Argument_names.list_options_on_error
+      +> arg Argument_names.nested_separator (estring __)
       +> flag "portable")
     (fun ~ctxt
       (_rec_flag, types)
       case_insensitive
-      capitalize_string
+      capitalization
       list_options_on_error
+      nested_separator
       portable ->
       let loc = Expansion_context.Deriver.derived_item_loc ctxt in
       let code_path = Expansion_context.Deriver.code_path ctxt in
@@ -995,8 +1040,9 @@ let generate_impl ~what_to_generate =
              ~loc
              ~code_path
              ~case_insensitive
-             ~capitalize_string
+             ~capitalization
              ~list_options_on_error
+             ~nested_separator
              ~what_to_generate
              ~portable))
 ;;

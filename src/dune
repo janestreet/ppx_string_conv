@@ -3,6 +3,7 @@
  (name ppx_string_conv)
  (kind ppx_rewriter)
  (ppx_runtime_libraries base)
- (libraries base capitalization compiler-libs.common ppxlib ppxlib_jane)
+ (libraries base capitalization capitalization.ppx_configuration
+   compiler-libs.common ppxlib ppxlib_jane)
  (preprocess
   (pps ppx_string ppx_let ppxlib.metaquot)))
