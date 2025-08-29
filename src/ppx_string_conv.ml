@@ -61,12 +61,12 @@ let type_of_decl (decl : type_declaration) : core_type =
 ;;
 
 let error_ext ~loc message : extension =
-  ( Loc.make ~loc "ocaml.error"
-  , PStr [ A.pstr_eval ~loc (A.estring ~loc [%string "%{ppx_name}: %{message}"]) [] ] )
+  Location.error_extensionf ~loc "%s: %s" ppx_name message
 ;;
 
 let psig_error ~loc message = A.psig_extension ~loc (error_ext ~loc message) []
 let pstr_error ~loc message = A.pstr_extension ~loc (error_ext ~loc message) []
+let pexp_error ~loc message = A.pexp_extension ~loc (error_ext ~loc message)
 let lstring (loc : string loc) = A.estring ~loc:loc.loc loc.txt
 
 let make_stringable_sig_for_type
@@ -397,22 +397,24 @@ module Generic_variant_renderer = struct
                (List [ Atom [%e message]; List [ Atom "value"; Atom [%e expr] ] ])]
          | true ->
            (match nested_cases with
-            | [] -> ()
             | _ :: _ ->
-              failwith "Using [list_options_on_error] is incompatible with [nested].");
-           let valid_strings =
-             A.elist
-               ~loc
-               (List.map basic_cases ~f:(fun basic_case ->
-                  [%expr Atom [%e A.estring ~loc basic_case.string.txt]]))
-           in
-           [%expr
-             Base.raise_s
-               (List
-                  [ Atom [%e message]
-                  ; List [ Atom "value"; Atom [%e expr] ]
-                  ; List [ Atom "valid_options"; List [%e valid_strings] ]
-                  ])])
+              pexp_error
+                ~loc:expr.pexp_loc
+                "Using [list_options_on_error] is incompatible with [nested]."
+            | [] ->
+              let valid_strings =
+                A.elist
+                  ~loc
+                  (List.map basic_cases ~f:(fun basic_case ->
+                     [%expr Atom [%e A.estring ~loc basic_case.string.txt]]))
+              in
+              [%expr
+                Base.raise_s
+                  (List
+                     [ Atom [%e message]
+                     ; List [ Atom "value"; Atom [%e expr] ]
+                     ; List [ Atom "valid_options"; List [%e valid_strings] ]
+                     ])]))
       | Some ({ expression_of_x; nested_type; pattern_with_x = _ } : Fallback_case.t) ->
         call_nested ~expression_of_x ~nested_type expr
     in
