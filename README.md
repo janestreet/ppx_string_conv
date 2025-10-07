@@ -99,13 +99,45 @@ For all the options you can use with `~capitalize`, see this error message:
 type t = Show_me_the_options [@@deriving string ~capitalize:"invalid"]
 ```
 ```mdx-error
-Line 1, characters 1-71:
-Error: ppx_string_conv: invalid capitalize argument: (can be: PascalCase,
-       camelCase, snake_case, Capitalized_snake_case, Pascal_Snake_Case,
-       SCREAMING_SNAKE_CASE, aLtErNaTiNg_sNaKe_cAsE, kebab-case,
-       Capitalized-kebab-case, Pascal-Kebab-Case, SCREAMING-KEBAB-CASE,
-       aLtErNaTiNg-kEbAb-cAsE, Sentence case, Title Case, lower sentence
-       case, UPPER SENTENCE CASE, aLtErNaTiNg sEnTeNcE CaSe)
+Line 1, characters 61-70:
+Error: ppx_string_conv: invalid capitalize argument
+       (can be: PascalCase, camelCase, snake_case, Capitalized_snake_case,
+        Pascal_Snake_Case, SCREAMING_SNAKE_CASE, aLtErNaTiNg_sNaKe_cAsE,
+        kebab-case, Capitalized-kebab-case, Pascal-Kebab-Case,
+        SCREAMING-KEBAB-CASE, aLtErNaTiNg-kEbAb-cAsE, Sentence case,
+        Title Case, lower sentence case, UPPER SENTENCE CASE,
+        aLtErNaTiNg sEnTeNcE CaSe)
+```
+
+There are also versions that only work when the variants are single words: `lowercase`,
+`UPPERCASE` and `Capitalized`. You can use these to leave the multiple word behavior
+unspecified if it's unknown/undecided.
+
+```ocaml
+module Single_words = struct
+  type t =
+    | Foo
+    | Bar
+  [@@deriving string ~capitalize:"lowercase", enumerate]
+end
+```
+
+If you try to add a multiple word variant later, you'll get an error:
+
+```ocaml
+module No_longer_single_words = struct
+  type t =
+    | Foo
+    | Bar
+    | Multiple_words
+  [@@deriving string ~capitalize:"lowercase", enumerate]
+end
+```
+```mdx-error
+Line 6, characters 36-47:
+Error: ppx_string_conv: capitalize argument must specify multiple word behavior
+       (potential options: camelCase, snake_case, kebab-case,
+        lower sentence case)
 ```
 
 ## Fallback cases with `[@fallback]`
@@ -238,6 +270,59 @@ Exception:
 
 Note that `~case_insensitive` works with prefixes too, but the part after the prefix will
 only be case-insensitive if the `of_string` implementation of the nested type is too
+
+### Auto-prefix support with `[@nested]`
+
+If you use `[@nested]` without any argument, the prefix will be automatically generated
+from the variant name using the capitalization style and separator specified by the
+`~capitalize` argument:
+
+```ocaml
+module Auto_prefix_demo = struct
+  type t =
+    | A
+    | B of string [@nested]
+    | Other_option of string [@nested]
+  [@@deriving string ~capitalize:"kebab-case", sexp_of]
+end
+```
+
+```ocaml
+# let () = print_endline (Auto_prefix_demo.to_string (B "hello"))
+b-hello
+# let () = print_endline (Auto_prefix_demo.to_string (Other_option "world"))
+other-option-world
+# let () = let t = Auto_prefix_demo.of_string "b-test" in print_s [%sexp (t : Auto_prefix_demo.t)]
+(B test)
+```
+
+### Custom separator for auto-prefix with `~nested_separator`
+
+You can override the separator used for auto-prefix generation by providing the
+`~nested_separator` argument. This allows you to use a different separator than what
+would be inferred from the `~capitalize` setting:
+
+```ocaml
+module Custom_separator_demo = struct
+  type t =
+    | Simple of string [@nested]
+    | Multi_word_variant of string [@nested]
+  [@@deriving string ~capitalize:"kebab-case" ~nested_separator:"/", sexp_of]
+end
+```
+
+```ocaml
+# let () = print_endline (Custom_separator_demo.to_string (Simple "test"))
+simple/test
+# let () = print_endline (Custom_separator_demo.to_string (Multi_word_variant "data"))
+multi-word-variant/data
+# let () = let t = Custom_separator_demo.of_string "simple/hello" in print_s [%sexp (t : Custom_separator_demo.t)]
+(Simple hello)
+```
+
+Note that `~nested_separator` only affects auto-prefix generation (when using `[@nested]`
+without an explicit prefix). It does not affect explicit prefixes specified with
+`[@nested "custom-prefix"]`.
 
 ### Empty prefix support (warning: potentially error-prone)
 
