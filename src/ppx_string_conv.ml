@@ -91,7 +91,8 @@ let make_stringable_sig_for_type
              (Loc.map decl.ptype_name ~f:(fun type_name ->
                 Fn_name.for_type fn_name ~type_name))
            ~prim:[]
-           ~modalities:(if portable then [ Ppxlib_jane.Modality "portable" ] else [])
+           ~modalities:
+             (if portable then Ppxlib_jane.Shim.Modalities.portable ~loc else [])
            ~type_:(sig_ t))
     in
     let build_fn (fn_name : Fn_name.t) =
@@ -933,6 +934,18 @@ let build_impl_or_error
   ~portable
   (decl : type_declaration)
   =
+  let%bind.Result () =
+    match (what_to_generate : What_to_generate.t) with
+    | Only Of_string | Both -> Ok ()
+    | Only To_string ->
+      if list_options_on_error
+      then
+        Error
+          [%string
+            "[%{Argument_names.list_options_on_error}] is not meaningful when only \
+             deriving [to_string]"]
+      else Ok ()
+  in
   match
     ( Ppxlib_jane.Shim.Type_kind.of_parsetree decl.ptype_kind
     , decl.ptype_params
