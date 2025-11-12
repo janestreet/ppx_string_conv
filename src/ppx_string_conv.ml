@@ -93,7 +93,8 @@ let make_stringable_sig_for_type
              (Loc.map decl.ptype_name ~f:(fun type_name ->
                 Fn_name.for_type fn_name ~type_name))
            ~prim:[]
-           ~modalities:(if portable then [ Ppxlib_jane.Modality "portable" ] else [])
+           ~modalities:
+             (if portable then Ppxlib_jane.Shim.Modalities.portable ~loc else [])
            ~type_:(sig_ t))
     in
     let build_fn (fn_name : Fn_name.t) =
@@ -551,7 +552,16 @@ module Variant_impl = struct
       Ok
         (Option.value_or_thunk name ~default:(fun () ->
            maybe_capitalize ~capitalization:t.capitalization pcd_name))
-    | _ -> Error (error_ext ~loc:constr.pcd_loc "expected unit variant without arguments")
+    | { pcd_args = Pcstr_tuple [ _arg ]; pcd_vars = []; pcd_res = None; pcd_name = _; _ }
+      ->
+      Error
+        (error_ext
+           ~loc:constr.pcd_loc
+           "expected variant without arguments: to take an argument, add [@nested] or \
+            [@nested \"your_prefix_here\"]")
+    | { pcd_args = _; pcd_vars = _; pcd_res = Some _; pcd_name = _; _ } ->
+      Error (error_ext ~loc:constr.pcd_loc "GADTs not supported")
+    | _ -> Error (error_ext ~loc:constr.pcd_loc "expected variant without arguments")
   ;;
 
   let get_nested_type constr =
@@ -559,6 +569,8 @@ module Variant_impl = struct
     | { pcd_args = Pcstr_tuple [ arg ]; pcd_vars = []; pcd_res = None; _ } ->
       let ty = Ppxlib_jane.Shim.Pcstr_tuple_arg.to_core_type arg in
       get_nested_type ~loc:ty.ptyp_loc ty
+    | { pcd_args = _; pcd_vars = _; pcd_res = Some _; pcd_name = _; _ } ->
+      Error (error_ext ~loc:constr.pcd_loc "GADTs not supported")
     | _ ->
       Error
         (error_ext
@@ -935,6 +947,18 @@ let build_impl_or_error
   ~portable
   (decl : type_declaration)
   =
+  let%bind.Result () =
+    match (what_to_generate : What_to_generate.t) with
+    | Only Of_string | Both -> Ok ()
+    | Only To_string ->
+      if list_options_on_error
+      then
+        Error
+          [%string
+            "[%{Argument_names.list_options_on_error}] is not meaningful when only \
+             deriving [to_string]"]
+      else Ok ()
+  in
   match
     ( Ppxlib_jane.Shim.Type_kind.of_parsetree decl.ptype_kind
     , decl.ptype_params
