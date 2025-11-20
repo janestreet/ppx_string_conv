@@ -22,8 +22,8 @@ module Fn_name = struct
     let loc = type_.loc in
     match type_.txt with
     | Lident "string" ->
-      (* Special case for the type 'string' -- there's no 'string_of_string' function,
-         so we use the identity function instead *)
+      (* Special case for the type 'string' -- there's no 'string_of_string' function, so
+         we use the identity function instead *)
       (match args with
        | [ expr ] -> expr
        | _ -> A.eapply ~loc [%expr fun s -> s] args)
@@ -290,9 +290,8 @@ module Generic_variant_renderer = struct
     (* If there are constructors with invalid parameters, we don't bother generate a
        [to_string] for them, making the match non-exhaustive
 
-       To avoid generating a confusing error about that that's shown to the user, we
-       need to add a dummy wildcard case if there are any errors to make the match
-       exhaustive. *)
+       To avoid generating a confusing error about that that's shown to the user, we need
+       to add a dummy wildcard case if there are any errors to make the match exhaustive. *)
     match errors with
     | [] -> []
     | _ :: _ -> [ A.case ~lhs:[%pat? _] ~guard:None ~rhs:[%expr assert false] ]
@@ -1011,8 +1010,8 @@ let build_impl_or_error
          ~portable
      | Ptyp_constr (_, _ :: _) -> Error "aliases to types with parameters not supported"
      | _ ->
-       (* There's a few other niche cases (objects/class/package types) which we
-            can give a generic message to *)
+       (* There's a few other niche cases (objects/class/package types) which we can give
+          a generic message to *)
        Error "type not supported")
 ;;
 
