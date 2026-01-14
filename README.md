@@ -229,9 +229,10 @@ end
  (valid_options (Blue Red)))
 ```
 
-## Nesting with `[@nested "prefix"]`
+## Variants with an argument require `[@nested]`
 
-You can nest types with a prefix to disambiguate
+If your variants take an argument, you must annotate with `[@nested]`. Variants with
+multiple arguments are not supported.
 
 ```ocaml
 module Nested = struct

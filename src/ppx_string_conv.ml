@@ -22,8 +22,8 @@ module Fn_name = struct
     let loc = type_.loc in
     match type_.txt with
     | Lident "string" ->
-      (* Special case for the type 'string' -- there's no 'string_of_string' function,
-         so we use the identity function instead *)
+      (* Special case for the type 'string' -- there's no 'string_of_string' function, so
+         we use the identity function instead *)
       (match args with
        | [ expr ] -> expr
        | _ -> A.eapply ~loc [%expr fun s -> s] args)
@@ -67,7 +67,24 @@ let error_ext ~loc message : extension =
 let psig_error ~loc message = A.psig_extension ~loc (error_ext ~loc message) []
 let pstr_error ~loc message = A.pstr_extension ~loc (error_ext ~loc message) []
 let pexp_error ~loc message = A.pexp_extension ~loc (error_ext ~loc message)
-let lstring (loc : string loc) = A.estring ~loc:loc.loc loc.txt
+
+module String_literal_or_variable = struct
+  type t =
+    | Literal of string Loc.t
+    | Variable of expression
+
+  let to_expression t =
+    match t with
+    | Literal s -> A.estring ~loc:s.loc s.txt
+    | Variable expr -> expr
+  ;;
+
+  let length_expression t ~loc =
+    match t with
+    | Literal s -> A.eint ~loc (String.length s.txt)
+    | Variable expr -> [%expr Base.String.length [%e expr]]
+  ;;
+end
 
 let make_stringable_sig_for_type
   ~loc
@@ -120,7 +137,7 @@ module Constructor_kind = struct
   type t =
     | Base_string of { name : string Loc.t option }
     | Fallback
-    | Nested of { prefix : string Loc.t option }
+    | Nested of { prefix : String_literal_or_variable.t option }
     | Nested_auto_prefix
 
   module Attr = struct
@@ -138,9 +155,9 @@ module Constructor_kind = struct
         context
         Ast_pattern.(
           alt
-            (map1 ~f:(fun prefix -> Some prefix) (single_expr_payload (estring __')))
+            (map1 ~f:(fun prefix_expr -> Some prefix_expr) (single_expr_payload __))
             (map0 ~f:None (pstr nil)))
-        (fun ~attr_loc:loc prefix -> loc, prefix)
+        (fun ~attr_loc:loc prefix_expr_opt -> loc, prefix_expr_opt)
     ;;
 
     let rename' context =
@@ -169,11 +186,20 @@ module Constructor_kind = struct
     in
     match fallback, nested, rename with
     | Some _, None, None -> Ok Fallback
-    | None, Some (_, prefix_opt), None ->
-      (match prefix_opt with
-       | Some prefix ->
-         let prefix = if String.is_empty prefix.txt then None else Some prefix in
-         Ok (Nested { prefix })
+    | None, Some (_, prefix_expr_opt), None ->
+      (match prefix_expr_opt with
+       | Some prefix_expr ->
+         (match prefix_expr.pexp_desc with
+          | Pexp_constant (Pconst_string (txt, _, _)) ->
+            let prefix =
+              if String.is_empty txt
+              then None
+              else
+                Some
+                  (String_literal_or_variable.Literal { txt; loc = prefix_expr.pexp_loc })
+            in
+            Ok (Nested { prefix })
+          | _ -> Ok (Nested { prefix = Some (Variable prefix_expr) }))
        | None -> Ok Nested_auto_prefix)
     | None, None, name -> Ok (Base_string { name })
     | Some loc, _, _ | _, Some (loc, _), _ -> multiple_attribute_error ~loc
@@ -227,7 +253,8 @@ let generate_auto_prefix ~capitalization ~variant_name ~nested_separator =
            "single word capitalizations are not compatible with [@nested];@ either \
             specify the ~nested_separator argument or use a multiple word capitalization")
   in
-  Loc.map transformed_name ~f:(fun name -> name ^ separator)
+  String_literal_or_variable.Literal
+    (Loc.map transformed_name ~f:(fun name -> name ^ separator))
 ;;
 
 let build_function ~loc ~decl ~fn_name ~types ~arg_name ~match_ ~cases ~portable =
@@ -258,7 +285,7 @@ module Generic_variant_renderer = struct
       { pattern_with_x : pattern
       ; expression_of_x : expression
       ; nested_type : longident Loc.t
-      ; prefix : string Loc.t option
+      ; prefix : String_literal_or_variable.t option
       }
   end
 
@@ -288,9 +315,8 @@ module Generic_variant_renderer = struct
     (* If there are constructors with invalid parameters, we don't bother generate a
        [to_string] for them, making the match non-exhaustive
 
-       To avoid generating a confusing error about that that's shown to the user, we
-       need to add a dummy wildcard case if there are any errors to make the match
-       exhaustive. *)
+       To avoid generating a confusing error about that that's shown to the user, we need
+       to add a dummy wildcard case if there are any errors to make the match exhaustive. *)
     match errors with
     | [] -> []
     | _ :: _ -> [ A.case ~lhs:[%pat? _] ~guard:None ~rhs:[%expr assert false] ]
@@ -320,7 +346,11 @@ module Generic_variant_renderer = struct
         let unprefixed = Fn_name.call ~type_:nested_type To_string [%expr x] in
         match prefix with
         | None -> unprefixed
-        | Some prefix -> [%expr Base.String.( ^ ) [%e lstring prefix] [%e unprefixed]]
+        | Some prefix ->
+          [%expr
+            Base.String.( ^ )
+              [%e String_literal_or_variable.to_expression prefix]
+              [%e unprefixed]]
       in
       build_case ~pattern:pattern_with_x ~expr:body
     in
@@ -427,24 +457,25 @@ module Generic_variant_renderer = struct
     in
     let build_nested_prefixed ~expression_of_x ~nested_type ~expr:s ~or_else ~prefix =
       (* Handler for [| Constr of nested_type [@nested "prefix"]] *)
+      let prefix_expr = String_literal_or_variable.to_expression prefix in
       match case_insensitive with
       | false ->
         [%expr
-          match Base.String.chop_prefix [%e s] ~prefix:[%e lstring prefix] with
+          match Base.String.chop_prefix [%e s] ~prefix:[%e prefix_expr] with
           | Some x -> [%e call_nested ~expression_of_x ~nested_type [%expr x]]
           | None -> [%e or_else]]
       | true ->
         (* There's no [Base.String.Caseless.chop_prefix] but we can make one ourselves
            with [is_prefix] and [drop_prefix]. *)
-        let prefix_length = A.eint ~loc:prefix.loc (String.length prefix.txt) in
+        let prefix_length = String_literal_or_variable.length_expression prefix ~loc in
         [%expr
-          match Base.String.Caseless.is_prefix [%e s] ~prefix:[%e lstring prefix] with
+          match Base.String.Caseless.is_prefix [%e s] ~prefix:[%e prefix_expr] with
           | true ->
             [%e
               call_nested
                 ~expression_of_x
                 ~nested_type
-                [%expr String.drop_prefix [%e s] [%e prefix_length]]]
+                [%expr Base.String.drop_prefix [%e s] [%e prefix_length]]]
           | false -> [%e or_else]]
     in
     let build_nested
@@ -537,7 +568,8 @@ module Variant_impl = struct
     ; decl : type_declaration
     ; base_string_variants : (constructor_declaration * string Loc.t) Queue.t
     ; nested_variants :
-        (constructor_declaration * longident_loc * string Loc.t option) Queue.t
+        (constructor_declaration * longident_loc * String_literal_or_variable.t option)
+          Queue.t
     ; mutable fallback_variant : (constructor_declaration * longident_loc) option
     ; errors : extension Queue.t
     ; list_options_on_error : bool
@@ -550,7 +582,16 @@ module Variant_impl = struct
       Ok
         (Option.value_or_thunk name ~default:(fun () ->
            maybe_capitalize ~capitalization:t.capitalization pcd_name))
-    | _ -> Error (error_ext ~loc:constr.pcd_loc "expected unit variant without arguments")
+    | { pcd_args = Pcstr_tuple [ _arg ]; pcd_vars = []; pcd_res = None; pcd_name = _; _ }
+      ->
+      Error
+        (error_ext
+           ~loc:constr.pcd_loc
+           "expected variant without arguments: to take an argument, add [@nested] or \
+            [@nested \"your_prefix_here\"]")
+    | { pcd_args = _; pcd_vars = _; pcd_res = Some _; pcd_name = _; _ } ->
+      Error (error_ext ~loc:constr.pcd_loc "GADTs not supported")
+    | _ -> Error (error_ext ~loc:constr.pcd_loc "expected variant without arguments")
   ;;
 
   let get_nested_type constr =
@@ -558,6 +599,8 @@ module Variant_impl = struct
     | { pcd_args = Pcstr_tuple [ arg ]; pcd_vars = []; pcd_res = None; _ } ->
       let ty = Ppxlib_jane.Shim.Pcstr_tuple_arg.to_core_type arg in
       get_nested_type ~loc:ty.ptyp_loc ty
+    | { pcd_args = _; pcd_vars = _; pcd_res = Some _; pcd_name = _; _ } ->
+      Error (error_ext ~loc:constr.pcd_loc "GADTs not supported")
     | _ ->
       Error
         (error_ext
@@ -998,8 +1041,8 @@ let build_impl_or_error
          ~portable
      | Ptyp_constr (_, _ :: _) -> Error "aliases to types with parameters not supported"
      | _ ->
-       (* There's a few other niche cases (objects/class/package types) which we
-            can give a generic message to *)
+       (* There's a few other niche cases (objects/class/package types) which we can give
+          a generic message to *)
        Error "type not supported")
 ;;
 
