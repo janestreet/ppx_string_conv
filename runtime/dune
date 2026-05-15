@@ -1,0 +1,5 @@
+(library
+ (public_name ppx_string_conv.runtime)
+ (name ppx_string_conv_runtime)
+ (libraries base)
+ (preprocess no_preprocessing))

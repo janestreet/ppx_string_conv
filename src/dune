@@ -2,7 +2,7 @@
  (public_name ppx_string_conv)
  (name ppx_string_conv)
  (kind ppx_rewriter)
- (ppx_runtime_libraries base)
+ (ppx_runtime_libraries ppx_string_conv.runtime)
  (libraries base capitalization capitalization.ppx_configuration
    compiler-libs.common ppxlib ppxlib_jane)
  (preprocess
